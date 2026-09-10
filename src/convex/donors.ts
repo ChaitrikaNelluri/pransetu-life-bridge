@@ -1,8 +1,7 @@
 import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 import { requireUser } from "./lib/rbac";
-import { bloodGroupValidator, type BloodGroup } from "./lib/constants";
-import { audit } from "./lib/events";
+import { bloodGroupValidator } from "./lib/constants";
 
 /** The signed-in user's donor profile, or null. */
 export const myProfile = query({

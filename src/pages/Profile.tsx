@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { AppShell } from "@/components/AppShell";
@@ -39,25 +39,30 @@ export default function Profile() {
   );
   const updateProfile = useMutation(api.donors.updateProfile);
 
-  const [bloodGroup, setBloodGroup] = useState<BloodGroup | "">("");
-  const [available, setAvailable] = useState(true);
-  const [location, setLocation] = useState<LocationValue | null>(null);
-  const [lastDonation, setLastDonation] = useState("");
+  // Edit overrides over the server record — no effect-driven state mirroring.
+  const [edits, setEdits] = useState<{
+    bloodGroup?: BloodGroup;
+    available?: boolean;
+    location?: LocationValue | null;
+    lastDonation?: string;
+  }>({});
   const [saving, setSaving] = useState(false);
 
-  useEffect(() => {
-    if (donorProfile) {
-      setBloodGroup(donorProfile.bloodGroup);
-      setAvailable(donorProfile.available);
-      setLocation({
-        label: donorProfile.locationLabel,
-        city: "",
-        lat: donorProfile.lat,
-        lng: donorProfile.lng,
-      });
-      setLastDonation(donorProfile.lastDonationDate ?? "");
-    }
-  }, [donorProfile]);
+  const bloodGroup = edits.bloodGroup ?? donorProfile?.bloodGroup ?? "";
+  const available = edits.available ?? donorProfile?.available ?? true;
+  const location =
+    edits.location !== undefined
+      ? edits.location
+      : donorProfile
+        ? {
+            label: donorProfile.locationLabel,
+            city: "",
+            lat: donorProfile.lat,
+            lng: donorProfile.lng,
+          }
+        : null;
+  const lastDonation =
+    edits.lastDonation ?? donorProfile?.lastDonationDate ?? "";
 
   const save = async () => {
     setSaving(true);
@@ -70,6 +75,7 @@ export default function Profile() {
         locationLabel: location?.label,
         lastDonationDate: lastDonation || null,
       });
+      setEdits({});
       toast.success("Profile updated.");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not save.");
@@ -111,7 +117,9 @@ export default function Profile() {
                   <Label>Blood group</Label>
                   <Select
                     value={bloodGroup}
-                    onValueChange={(v) => setBloodGroup(v as BloodGroup)}
+                    onValueChange={(v) =>
+                      setEdits((e) => ({ ...e, bloodGroup: v as BloodGroup }))
+                    }
                   >
                     <SelectTrigger>
                       <SelectValue />
@@ -131,7 +139,9 @@ export default function Profile() {
                     id="pf-lastdon"
                     type="date"
                     value={lastDonation}
-                    onChange={(e) => setLastDonation(e.target.value)}
+                    onChange={(e) =>
+                      setEdits((ed) => ({ ...ed, lastDonation: e.target.value }))
+                    }
                   />
                   <p className="text-xs text-muted-foreground">
                     Used only as a 90-day interval guard — not a medical record.
@@ -151,7 +161,7 @@ export default function Profile() {
                 <Switch
                   id="pf-avail"
                   checked={available}
-                  onCheckedChange={setAvailable}
+                  onCheckedChange={(v) => setEdits((e) => ({ ...e, available: v }))}
                 />
               </div>
 
@@ -160,7 +170,7 @@ export default function Profile() {
                 <div className="mt-2">
                   <LocationPicker
                     value={location}
-                    onChange={setLocation}
+                    onChange={(v) => setEdits((e) => ({ ...e, location: v }))}
                     idPrefix="pf"
                   />
                 </div>

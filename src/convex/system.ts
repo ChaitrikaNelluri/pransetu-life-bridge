@@ -2,7 +2,6 @@ import { query } from "./_generated/server";
 import { v } from "convex/values";
 import { requireUser } from "./lib/rbac";
 import { haversineKm } from "./lib/geo";
-import type { Id } from "./_generated/dataModel";
 
 /** Health check — dependency probes for the ops dashboard. */
 export const health = query({

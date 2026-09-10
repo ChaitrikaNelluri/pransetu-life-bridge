@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { AppShell } from "@/components/AppShell";
@@ -11,7 +11,6 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { StatusStamp } from "@/components/vintage";
 import { toast } from "sonner";
 import { Droplets, Loader2, Save } from "lucide-react";
@@ -23,16 +22,15 @@ export default function OrgDashboard() {
   const inventory = useQuery(api.organizations.myInventory);
   const saveInventoryUnit = useMutation(api.organizations.setInventoryUnit);
 
-  const [draft, setDraft] = useState<Record<string, number>>({});
+  const [edits, setEdits] = useState<Record<string, number>>({});
   const [saving, setSaving] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (inventory) {
-      const next: Record<string, number> = {};
-      for (const inv of inventory) next[inv.bloodGroup] = inv.units;
-      setDraft(next);
-    }
-  }, [inventory]);
+  // Draft per group = explicit edit if any, otherwise the server value.
+  const draftOf = (group: string, fallback: number) => edits[group] ?? fallback;
+  // Baseline the ledger resets to when a save lands.
+  const serverUnits = new Map((inventory ?? []).map((i) => [i.bloodGroup, i.units]));
+
+  const discardEdits = () => setEdits({});
 
   if (org === undefined) {
     return (
@@ -67,7 +65,12 @@ export default function OrgDashboard() {
     try {
       await saveInventoryUnit({
         bloodGroup: group,
-        units: Math.max(0, Math.floor(draft[group] ?? 0)),
+        units: Math.max(0, Math.floor(draftOf(group, 0))),
+      });
+      setEdits((e) => {
+        const next = { ...e };
+        delete next[group];
+        return next;
       });
       toast.success(`${group} ledger updated.`);
     } catch (err) {
@@ -97,6 +100,18 @@ export default function OrgDashboard() {
             </p>
           )}
         </div>
+
+        {Object.keys(edits).length > 0 && (
+          <div className="flex items-center justify-between rounded-sm border border-chart-4/50 bg-chart-4/5 px-3 py-2 text-sm">
+            <span>
+              Unsaved edits to {Object.keys(edits).length} group
+              {Object.keys(edits).length === 1 ? "" : "s"}.
+            </span>
+            <Button size="sm" variant="ghost" onClick={discardEdits}>
+              Discard
+            </Button>
+          </div>
+        )}
 
         {org.type === "blood_bank" ? (
           <Card className="plate">
@@ -129,9 +144,9 @@ export default function OrgDashboard() {
                           type="number"
                           min={0}
                           max={999}
-                          value={draft[g] ?? 0}
+                          value={draftOf(g, serverUnits.get(g) ?? 0)}
                           onChange={(e) =>
-                            setDraft((u) => ({
+                            setEdits((u) => ({
                               ...u,
                               [g]: Number(e.target.value),
                             }))
