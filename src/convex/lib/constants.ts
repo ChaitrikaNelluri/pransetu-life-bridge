@@ -1,3 +1,5 @@
+import { v } from "convex/values";
+
 export const APP_NAME = "PranSetu";
 export const APP_TAGLINE = "The Bridge for Life";
 export const APP_POSITIONING = "Intelligent emergency blood coordination";
@@ -14,6 +16,13 @@ export const BLOOD_GROUPS = [
   "AB-",
 ] as const;
 export type BloodGroup = (typeof BLOOD_GROUPS)[number];
+
+export const bloodGroupValidator = v.union(
+  ...BLOOD_GROUPS.map((g) => v.literal(g)),
+);
+
+export const URGENCIES = ["routine", "urgent", "critical"] as const;
+export const urgencyValidator = v.union(...URGENCIES.map((u) => v.literal(u)));
 
 /** Which donors can give to a recipient, treating Rh as +/- only. */
 export const COMPATIBILITY: Record<BloodGroup, BloodGroup[]> = {

@@ -13,6 +13,14 @@ import "./index.css";
 const Landing = lazy(() => import("./pages/Landing.tsx"));
 const AuthPage = lazy(() => import("./pages/Auth.tsx"));
 const Dashboard = lazy(() => import("./pages/Dashboard.tsx"));
+const Onboarding = lazy(() => import("./pages/Onboarding.tsx"));
+const RequestsList = lazy(() => import("./pages/RequestsList.tsx"));
+const RequestNew = lazy(() => import("./pages/RequestNew.tsx"));
+const RequestDetail = lazy(() => import("./pages/RequestDetail.tsx"));
+const BloodBanks = lazy(() => import("./pages/BloodBanks.tsx"));
+const OrgDashboard = lazy(() => import("./pages/OrgDashboard.tsx"));
+const Profile = lazy(() => import("./pages/Profile.tsx"));
+const Admin = lazy(() => import("./pages/Admin.tsx"));
 const NotFound = lazy(() => import("./pages/NotFound.tsx"));
 
 // Simple loading fallback for route transitions
@@ -82,8 +90,6 @@ class RootErrorBoundary extends React.Component<
 
 const convex = new ConvexReactClient(import.meta.env.VITE_CONVEX_URL as string);
 
-
-
 function RouteSyncer() {
   const location = useLocation();
   useEffect(() => {
@@ -107,7 +113,6 @@ function RouteSyncer() {
   return null;
 }
 
-
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <RootErrorBoundary>
@@ -129,6 +134,70 @@ createRoot(document.getElementById("root")!).render(
                 element={
                   <RequireAuth>
                     <Dashboard />
+                  </RequireAuth>
+                }
+              />
+              <Route
+                path="/onboarding"
+                element={
+                  <RequireAuth>
+                    <Onboarding />
+                  </RequireAuth>
+                }
+              />
+              <Route
+                path="/requests"
+                element={
+                  <RequireAuth>
+                    <RequestsList />
+                  </RequireAuth>
+                }
+              />
+              <Route
+                path="/requests/new"
+                element={
+                  <RequireAuth>
+                    <RequestNew />
+                  </RequireAuth>
+                }
+              />
+              <Route
+                path="/requests/:id"
+                element={
+                  <RequireAuth>
+                    <RequestDetail />
+                  </RequireAuth>
+                }
+              />
+              <Route
+                path="/blood-banks"
+                element={
+                  <RequireAuth>
+                    <BloodBanks />
+                  </RequireAuth>
+                }
+              />
+              <Route
+                path="/org"
+                element={
+                  <RequireAuth>
+                    <OrgDashboard />
+                  </RequireAuth>
+                }
+              />
+              <Route
+                path="/profile"
+                element={
+                  <RequireAuth>
+                    <Profile />
+                  </RequireAuth>
+                }
+              />
+              <Route
+                path="/admin"
+                element={
+                  <RequireAuth>
+                    <Admin />
                   </RequireAuth>
                 }
               />

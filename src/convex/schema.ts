@@ -1,6 +1,10 @@
 import { authTables } from "@convex-dev/auth/server";
 import { defineSchema, defineTable } from "convex/server";
 import { Infer, v } from "convex/values";
+import {
+  bloodGroupValidator,
+  urgencyValidator,
+} from "./lib/constants";
 
 // ---------------------------------------------------------------------------
 // PranSetu — The Bridge for Life
@@ -28,23 +32,8 @@ export const roleValidator = v.union(
 );
 export type Role = Infer<typeof roleValidator>;
 
-export const BLOOD_GROUPS = [
-  "O+",
-  "O-",
-  "A+",
-  "A-",
-  "B+",
-  "B-",
-  "AB+",
-  "AB-",
-] as const;
-export const bloodGroupValidator = v.union(
-  ...BLOOD_GROUPS.map((g) => v.literal(g)),
-);
+export { bloodGroupValidator, urgencyValidator };
 export type BloodGroup = Infer<typeof bloodGroupValidator>;
-
-export const URGENCIES = ["routine", "urgent", "critical"] as const;
-export const urgencyValidator = v.union(...URGENCIES.map((u) => v.literal(u)));
 
 export const REQUEST_STATUSES = [
   "SUBMITTED",
@@ -84,6 +73,7 @@ const schema = defineSchema(
     donorProfiles: defineTable({
       userId: v.id("users"),
       bloodGroup: bloodGroupValidator,
+      phone: v.optional(v.string()), // shared only when the donor responds
       lat: v.number(),
       lng: v.number(),
       locationLabel: v.string(), // e.g. "Indiranagar, Bengaluru"
