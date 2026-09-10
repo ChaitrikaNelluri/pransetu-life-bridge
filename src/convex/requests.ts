@@ -7,30 +7,17 @@ import {
   SEARCH_RADII_KM,
   MAX_DONOR_CANDIDATES,
   REQUEST_TTL_HOURS,
+  NOTIFY_BATCH_SIZE,
+  DUPLICATE_WINDOW_MINUTES,
+  AUTO_VERIFY_MINUTES,
   type BloodGroup,
 } from "./lib/constants";
 import { boundingBox, haversineKm } from "./lib/geo";
 import { scoreCandidate, type ScoredCandidate } from "./lib/matching";
 import { compatibleDonorsFor } from "./lib/compatibility";
+import { assertTransition, statusAfterFulfillment, OPEN_FOR_RESPONSES } from "./lib/stateMachine";
 import { notify, audit } from "./lib/events";
 import type { RequestStatus } from "./schema";
-
-const VALID_TRANSITIONS: Record<RequestStatus, RequestStatus[]> = {
-  SUBMITTED: ["ACTIVE", "REJECTED", "CANCELLED", "EXPIRED"],
-  ACTIVE: ["DONOR_ACCEPTED", "FULFILLED", "CANCELLED", "EXPIRED"],
-  DONOR_ACCEPTED: ["FULFILLED", "CANCELLED", "EXPIRED"],
-  FULFILLED: [],
-  CANCELLED: [],
-  EXPIRED: [],
-  REJECTED: [],
-};
-
-function assertTransition(from: RequestStatus, to: RequestStatus) {
-  if (from === to) return;
-  if (!VALID_TRANSITIONS[from].includes(to)) {
-    throw new Error(`INVALID_STATE: ${from} → ${to}`);
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Matching engine. Two-phase search: index-friendly bounding-box candidates,
@@ -88,16 +75,23 @@ export async function findCandidates(
   return scored.slice(0, limit);
 }
 
-/** Notify ranked candidates about an active emergency. */
+/** Notify a set of ranked candidates. Idempotent via the notified array. */
 async function notifyCandidates(
   ctx: import("./_generated/server").MutationCtx,
   requestId: string,
-  request: { bloodGroup: BloodGroup; hospitalName: string; city: string; urgency: string },
+  request: {
+    bloodGroup: BloodGroup;
+    hospitalName: string;
+    city: string;
+    urgency: string;
+  },
   candidates: ScoredCandidate[],
-) {
+  alreadyNotified: string[],
+): Promise<number> {
+  const fresh = candidates.filter((c) => !alreadyNotified.includes(c.userId));
   const title = `${request.urgency === "critical" ? "CRITICAL" : "Emergency"}: ${request.bloodGroup} needed`;
   const body = `${request.bloodGroup} blood needed at ${request.hospitalName}, ${request.city}.`;
-  for (const c of candidates) {
+  for (const c of fresh) {
     await notify(ctx, {
       userId: c.userId as never,
       type: "REQUEST_MATCHED",
@@ -106,6 +100,7 @@ async function notifyCandidates(
       requestId: requestId as never,
     });
   }
+  return fresh.length;
 }
 
 // ---------------------------------------------------------------------------
@@ -144,6 +139,36 @@ export const active = query({
   },
 });
 
+/** All requests in open (non-terminal) states — the live ledger view. */
+export const open = query({
+  args: {},
+  handler: async (ctx) => {
+    await requireUser(ctx);
+    const statuses = [
+      "SUBMITTED",
+      "VERIFICATION_PENDING",
+      "ACTIVE",
+      "DONOR_CONTACTED",
+      "DONOR_ACCEPTED",
+      "PARTIALLY_FULFILLED",
+    ] as const;
+    const results = [];
+    for (const status of statuses) {
+      const rows = await ctx.db
+        .query("emergencyRequests")
+        .withIndex("by_status", (q) => q.eq("status", status))
+        .order("desc")
+        .take(30);
+      results.push(...rows);
+    }
+    return results.sort((a, b) => {
+      const w = { critical: 0, urgent: 1, routine: 2 } as const;
+      if (w[a.urgency] !== w[b.urgency]) return w[a.urgency] - w[b.urgency];
+      return b._creationTime - a._creationTime;
+    });
+  },
+});
+
 export const mine = query({
   args: {},
   handler: async (ctx) => {
@@ -156,7 +181,20 @@ export const mine = query({
   },
 });
 
-/** Active compatible requests near a donor (rings of 5/10/25/50 km). */
+/** All requests filed by one user — includes terminal states for history. */
+export const mineAll = query({
+  args: {},
+  handler: async (ctx) => {
+    const user = await requireUser(ctx);
+    return await ctx.db
+      .query("emergencyRequests")
+      .withIndex("by_requester", (q) => q.eq("requesterId", user._id))
+      .order("desc")
+      .take(100);
+  },
+});
+
+/** Active compatible requests near a donor, prioritized. */
 export const activeNearby = query({
   args: { lat: v.number(), lng: v.number() },
   handler: async (ctx, args) => {
@@ -174,7 +212,6 @@ export const activeNearby = query({
       }))
       .filter((r) => r.distanceKm <= 50)
       .sort((a, b) => {
-        // urgency first, then required-by
         const w = { critical: 0, urgent: 1, routine: 2 } as const;
         if (w[a.urgency] !== w[b.urgency]) return w[a.urgency] - w[b.urgency];
         return a.requiredBy - b.requiredBy;
@@ -183,7 +220,7 @@ export const activeNearby = query({
   },
 });
 
-/** Ranked candidate list for one request — the explainable match sheet. */
+/** Explainable ranked match sheet for one request. */
 export const matches = query({
   args: { requestId: v.id("emergencyRequests") },
   handler: async (ctx, args) => {
@@ -243,29 +280,39 @@ export const create = mutation({
     if (args.lat < -90 || args.lat > 90 || args.lng < -180 || args.lng > 180) {
       throw new Error("INVALID_COORDINATES");
     }
-    const requiredBy = args.requiredBy;
-    if (requiredBy < Date.now()) throw new Error("REQUIRED_BY_IN_PAST");
-    if (requiredBy > Date.now() + 14 * 24 * 3600 * 1000) {
+    if (args.requiredBy < Date.now()) throw new Error("REQUIRED_BY_IN_PAST");
+    if (args.requiredBy > Date.now() + 14 * 24 * 3600 * 1000) {
       throw new Error("REQUIRED_BY_TOO_FAR");
     }
 
-    // Duplicate guard: same requester, group, hospital within 30 minutes.
+    // Rate limit: max 5 filings per user per hour (coordination guard),
+    // then duplicate guard: same requester, group, hospital in the window.
     const myRecent = await ctx.db
       .query("emergencyRequests")
       .withIndex("by_requester", (q) => q.eq("requesterId", user._id))
       .order("desc")
       .take(5);
+    const recentCount = myRecent.filter(
+      (r) => Date.now() - r._creationTime < 60 * 60 * 1000,
+    ).length;
+    if (recentCount >= 5) throw new Error("RATE_LIMITED: try again later");
+
     const dupe = myRecent.find(
       (r) =>
         r.status !== "CANCELLED" &&
         r.status !== "REJECTED" &&
         r.bloodGroup === args.bloodGroup &&
         r.hospitalName === args.hospitalName &&
-        Date.now() - r._creationTime < 30 * 60 * 1000,
+        Date.now() - r._creationTime < DUPLICATE_WINDOW_MINUTES * 60 * 1000,
     );
     if (dupe) throw new Error("DUPLICATE_REQUEST");
 
     const now = Date.now();
+    // Verification workflow: SUBMITTED first; coordinators' filings are
+    // trusted (hospital-signed). Everyone else waits for admin/coordinator
+    // review, with a grace auto-activation so genuine emergencies are never
+    // blocked for long.
+    const autoActive = user.role === "hospital" || user.role === "admin";
     const id = await ctx.db.insert("emergencyRequests", {
       requesterId: user._id,
       patientRef: args.patientRef.trim(),
@@ -277,25 +324,29 @@ export const create = mutation({
       city: args.city,
       lat: args.lat,
       lng: args.lng,
-      requiredBy,
+      requiredBy: args.requiredBy,
       contactPhone: args.contactPhone.trim(),
       description: args.description?.trim(),
-      status: "ACTIVE",
-      verificationStatus: "unverified",
+      status: autoActive ? "ACTIVE" : "SUBMITTED",
+      verificationStatus: autoActive ? "verified" : "unverified",
+      verifiedBy: autoActive ? user._id : undefined,
       expiresAt: now + REQUEST_TTL_HOURS * 3600 * 1000,
       radiusKm: SEARCH_RADII_KM[0],
     });
 
-    // Immediate notification to the first ring of candidates.
-    const candidates = await findCandidates(
-      ctx,
-      { bloodGroup: args.bloodGroup, lat: args.lat, lng: args.lng },
-      SEARCH_RADII_KM[0],
-      10,
-    );
-    await notifyCandidates(ctx, id, args, candidates);
-
-    await ctx.db.patch(id, { radiusKm: SEARCH_RADII_KM[0] });
+    let notified = 0;
+    if (autoActive) {
+      const candidates = await findCandidates(
+        ctx,
+        { bloodGroup: args.bloodGroup, lat: args.lat, lng: args.lng },
+        SEARCH_RADII_KM[0],
+        NOTIFY_BATCH_SIZE,
+      );
+      notified = await notifyCandidates(ctx, id, args, candidates, []);
+      if (candidates.length > 0) {
+        await ctx.db.patch(id, { status: "DONOR_CONTACTED" });
+      }
+    }
 
     await audit(ctx, {
       actorId: user._id,
@@ -304,7 +355,7 @@ export const create = mutation({
       meta: {
         bloodGroup: args.bloodGroup,
         urgency: args.urgency,
-        notified: candidates.length,
+        notified,
       },
     });
 
@@ -312,7 +363,85 @@ export const create = mutation({
   },
 });
 
-/** Donor offers to donate (or blood bank confirms units). */
+/** Admin / coordinator verification decision on a submitted request. */
+export const verify = mutation({
+  args: { requestId: v.id("emergencyRequests"), approve: v.boolean() },
+  handler: async (ctx, args) => {
+    const user = await requireUser(ctx);
+    if (user.role !== "admin" && user.role !== "hospital") {
+      throw new Error("FORBIDDEN: only admins and coordinators verify");
+    }
+    const request = await ctx.db.get(args.requestId);
+    if (!request) throw new Error("REQUEST_NOT_FOUND");
+    if (request.status !== "SUBMITTED") throw new Error("NOT_PENDING_VERIFICATION");
+
+    if (!args.approve) {
+      assertTransition(request.status, "REJECTED");
+      await ctx.db.patch(request._id, {
+        status: "REJECTED",
+        verificationStatus: "rejected",
+        verifiedBy: user._id,
+      });
+      await notify(ctx, {
+        userId: request.requesterId,
+        type: "REQUEST_REJECTED",
+        title: "Request not approved",
+        body: `Your ${request.bloodGroup} request at ${request.hospitalName} was not approved after review.`,
+        requestId: request._id,
+      });
+      await audit(ctx, {
+        actorId: user._id,
+        action: "REQUEST_VERIFIED",
+        target: `request:${args.requestId}`,
+        meta: { decision: "rejected" },
+      });
+      return { ok: true };
+    }
+
+    assertTransition(request.status, "ACTIVE");
+    await ctx.db.patch(request._id, {
+      status: "ACTIVE",
+      verificationStatus: "verified",
+      verifiedBy: user._id,
+    });
+
+    // First notification wave at the initial radius.
+    const candidates = await findCandidates(
+      ctx,
+      { bloodGroup: request.bloodGroup, lat: request.lat, lng: request.lng },
+      SEARCH_RADII_KM[0],
+      NOTIFY_BATCH_SIZE,
+    );
+    const notified = await notifyCandidates(
+      ctx,
+      request._id,
+      request,
+      candidates,
+      [],
+    );
+    if (candidates.length > 0) {
+      await ctx.db.patch(request._id, { status: "DONOR_CONTACTED" });
+    }
+
+    await notify(ctx, {
+      userId: request.requesterId,
+      type: "REQUEST_VERIFIED",
+      title: "Request verified and live",
+      body: `Your ${request.bloodGroup} request at ${request.hospitalName} is now active. ${notified} nearby donors were notified.`,
+      requestId: request._id,
+    });
+
+    await audit(ctx, {
+      actorId: user._id,
+      action: "REQUEST_VERIFIED",
+      target: `request:${args.requestId}`,
+      meta: { decision: "approved", notified },
+    });
+    return { ok: true };
+  },
+});
+
+/** Donor offers to donate (or blood bank confirms availability). */
 export const respond = mutation({
   args: {
     requestId: v.id("emergencyRequests"),
@@ -324,7 +453,7 @@ export const respond = mutation({
 
     const request = await ctx.db.get(args.requestId);
     if (!request) throw new Error("REQUEST_NOT_FOUND");
-    if (!["ACTIVE", "DONOR_ACCEPTED"].includes(request.status)) {
+    if (!OPEN_FOR_RESPONSES.includes(request.status)) {
       throw new Error("REQUEST_NOT_ACCEPTING_RESPONSES");
     }
 
@@ -334,8 +463,9 @@ export const respond = mutation({
         .withIndex("by_user", (q) => q.eq("userId", user._id))
         .unique();
       if (!profile) throw new Error("NO_DONOR_PROFILE");
+      if (!profile.available) throw new Error("NOT_AVAILABLE");
 
-      // idempotency: one active response per donor per request
+      // Idempotency: one active response per donor per request.
       const existing = await ctx.db
         .query("requestResponses")
         .withIndex("by_request", (q) => q.eq("requestId", args.requestId))
@@ -358,9 +488,10 @@ export const respond = mutation({
         createdAt: Date.now(),
       });
 
-      // Request moves to DONOR_ACCEPTED once anyone has offered.
-      assertTransition(request.status, "DONOR_ACCEPTED");
-      await ctx.db.patch(request._id, { status: "DONOR_ACCEPTED" });
+      if (request.status === "ACTIVE" || request.status === "DONOR_CONTACTED") {
+        assertTransition(request.status, "DONOR_ACCEPTED");
+        await ctx.db.patch(request._id, { status: "DONOR_ACCEPTED" });
+      }
 
       await notify(ctx, {
         userId: request.requesterId,
@@ -383,6 +514,22 @@ export const respond = mutation({
       if (!org || org.verificationStatus !== "verified") {
         throw new Error("ORG_NOT_VERIFIED");
       }
+      // Idempotency: one active response per org per request.
+      const existing = await ctx.db
+        .query("requestResponses")
+        .withIndex("by_request", (q) => q.eq("requestId", args.requestId))
+        .collect();
+      if (
+        existing.some(
+          (r) =>
+            r.responderId === user._id &&
+            r.kind === "blood_bank" &&
+            r.status !== "declined",
+        )
+      ) {
+        throw new Error("ALREADY_RESPONDED");
+      }
+
       await ctx.db.insert("requestResponses", {
         requestId: args.requestId,
         responderId: user._id,
@@ -398,7 +545,7 @@ export const respond = mutation({
         userId: request.requesterId,
         type: "BLOOD_BANK_RESPONDED",
         title: "A blood bank responded",
-        body: `${org.name} responded to your ${request.bloodGroup} request.`,
+        body: `${org.name} can help with your ${request.bloodGroup} request.`,
         requestId: request._id,
       });
 
@@ -406,6 +553,7 @@ export const respond = mutation({
         actorId: user._id,
         action: "BLOOD_BANK_RESPONDED",
         target: `request:${args.requestId}`,
+        meta: { units: args.units },
       });
       return { ok: true };
     }
@@ -414,7 +562,30 @@ export const respond = mutation({
   },
 });
 
-/** Requester records one unit received (counted atomically). */
+/** Donor withdraws an offered response. */
+export const decline = mutation({
+  args: { requestId: v.id("emergencyRequests") },
+  handler: async (ctx, args) => {
+    const user = await requireUser(ctx);
+    const existing = await ctx.db
+      .query("requestResponses")
+      .withIndex("by_request", (q) => q.eq("requestId", args.requestId))
+      .collect();
+    const mine = existing.find(
+      (r) => r.responderId === user._id && r.status === "offered",
+    );
+    if (!mine) throw new Error("NO_OFFER_TO_WITHDRAW");
+    await ctx.db.patch(mine._id, { status: "declined" });
+    await audit(ctx, {
+      actorId: user._id,
+      action: "DONOR_REJECTED_REQUEST",
+      target: `request:${args.requestId}`,
+    });
+    return { ok: true };
+  },
+});
+
+/** Requester records one unit received — atomic, transaction-safe counting. */
 export const markFulfilled = mutation({
   args: { requestId: v.id("emergencyRequests") },
   handler: async (ctx, args) => {
@@ -427,15 +598,22 @@ export const markFulfilled = mutation({
     if (request.unitsFulfilled >= request.unitsRequired) {
       throw new Error("ALREADY_FULFILLED");
     }
+    if (!OPEN_FOR_RESPONSES.includes(request.status) && request.status !== "ACTIVE") {
+      throw new Error("REQUEST_CLOSED");
+    }
 
     const unitsFulfilled = request.unitsFulfilled + 1;
-    const done = unitsFulfilled >= request.unitsRequired;
-    assertTransition(request.status, done ? "FULFILLED" : request.status);
+    const next = statusAfterFulfillment(
+      request.status,
+      unitsFulfilled,
+      request.unitsRequired,
+    );
+    await ctx.db.patch(request._id, {
+      unitsFulfilled,
+      ...(next ? { status: next } : {}),
+    });
 
-    await ctx.db.patch(request._id, { unitsFulfilled, status: done ? "FULFILLED" : request.status });
-
-    if (done) {
-      // thank the responders
+    if (next === "FULFILLED") {
       const resps = await ctx.db
         .query("requestResponses")
         .withIndex("by_request", (q) => q.eq("requestId", args.requestId))
@@ -452,17 +630,45 @@ export const markFulfilled = mutation({
           });
         }
       }
+      await notify(ctx, {
+        userId: request.requesterId,
+        type: "REQUEST_FULFILLED",
+        title: "All units fulfilled",
+        body: `Your ${request.bloodGroup} request at ${request.hospitalName} is fully fulfilled. You can now close the folio.`,
+        requestId: request._id,
+      });
       await audit(ctx, {
         actorId: user._id,
         action: "REQUEST_FULFILLED",
         target: `request:${args.requestId}`,
       });
     }
-    return { unitsFulfilled, done };
+    return { unitsFulfilled, done: next === "FULFILLED" };
   },
 });
 
-/** Requester cancels (or admin rejects) an active request. */
+/** Requester closes a fulfilled folio. */
+export const close = mutation({
+  args: { requestId: v.id("emergencyRequests") },
+  handler: async (ctx, args) => {
+    const user = await requireUser(ctx);
+    const request = await ctx.db.get(args.requestId);
+    if (!request) throw new Error("REQUEST_NOT_FOUND");
+    if (request.requesterId !== user._id && user.role !== "admin") {
+      throw new Error("FORBIDDEN");
+    }
+    assertTransition(request.status, "CLOSED");
+    await ctx.db.patch(request._id, { status: "CLOSED" });
+    await audit(ctx, {
+      actorId: user._id,
+      action: "REQUEST_CLOSED",
+      target: `request:${args.requestId}`,
+    });
+    return { ok: true };
+  },
+});
+
+/** Requester cancels (or admin rejects) an open request. */
 export const cancel = mutation({
   args: { requestId: v.id("emergencyRequests") },
   handler: async (ctx, args) => {
@@ -483,35 +689,122 @@ export const cancel = mutation({
   },
 });
 
-/** Cron: expire overdue ACTIVE/SUBMITTED requests (internal — cron only). */
+// ---------------------------------------------------------------------------
+// Background jobs (cron-driven — the BullMQ equivalent on Convex)
+// ---------------------------------------------------------------------------
+
+/** Cron: expire overdue open requests. */
 export const expireOverdue = internalMutation({
   args: {},
   handler: async (ctx) => {
     const now = Date.now();
-    const activeReqs = await ctx.db
-      .query("emergencyRequests")
-      .withIndex("by_status", (q) => q.eq("status", "ACTIVE"))
-      .collect();
-    const submittedReqs = await ctx.db
-      .query("emergencyRequests")
-      .withIndex("by_status", (q) => q.eq("status", "SUBMITTED"))
-      .collect();
-
+    const statuses: RequestStatus[] = ["SUBMITTED", "VERIFICATION_PENDING", "ACTIVE", "DONOR_CONTACTED", "DONOR_ACCEPTED", "PARTIALLY_FULFILLED"];
     let expired = 0;
-    for (const r of [...activeReqs, ...submittedReqs]) {
-      if (r.expiresAt < now) {
-        assertTransition(r.status, "EXPIRED");
-        await ctx.db.patch(r._id, { status: "EXPIRED" });
-        await notify(ctx, {
-          userId: r.requesterId,
-          type: "REQUEST_EXPIRED",
-          title: "Request expired",
-          body: `Your ${r.bloodGroup} request at ${r.hospitalName} expired unfulfilled after ${REQUEST_TTL_HOURS}h. File a new one if the need remains.`,
-          requestId: r._id,
-        });
-        expired++;
+    for (const status of statuses) {
+      const rows = await ctx.db
+        .query("emergencyRequests")
+        .withIndex("by_status", (q) => q.eq("status", status))
+        .collect();
+      for (const r of rows) {
+        if (r.expiresAt < now) {
+          assertTransition(r.status, "EXPIRED");
+          await ctx.db.patch(r._id, { status: "EXPIRED" });
+          await notify(ctx, {
+            userId: r.requesterId,
+            type: "REQUEST_EXPIRED",
+            title: "Request expired",
+            body: `Your ${r.bloodGroup} request at ${r.hospitalName} expired unfulfilled after ${REQUEST_TTL_HOURS}h. File a new one if the need remains.`,
+            requestId: r._id,
+          });
+          expired++;
+        }
       }
     }
     return { expired };
+  },
+});
+
+/**
+ * Cron: progressive expansion. Every wave, open requests that still need
+ * units reach the next radius ring; newly-in-range candidates are notified.
+ * Batching prevents spamming the entire donor pool at once.
+ */
+export const expandWaves = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const statuses: RequestStatus[] = [
+      "ACTIVE",
+      "DONOR_CONTACTED",
+      "DONOR_ACCEPTED",
+      "PARTIALLY_FULFILLED",
+    ];
+    let expanded = 0;
+    let notifiedTotal = 0;
+    for (const status of statuses) {
+      const rows = await ctx.db
+        .query("emergencyRequests")
+        .withIndex("by_status", (q) => q.eq("status", status))
+        .collect();
+      for (const r of rows) {
+        if (r.unitsFulfilled >= r.unitsRequired) continue;
+        const currentIdx = SEARCH_RADII_KM.findIndex(
+          (km) => km === (r.radiusKm ?? SEARCH_RADII_KM[0]),
+        );
+        if (currentIdx >= SEARCH_RADII_KM.length - 1) continue;
+        const nextRadius = SEARCH_RADII_KM[currentIdx + 1];
+        const candidates = await findCandidates(
+          ctx,
+          { bloodGroup: r.bloodGroup, lat: r.lat, lng: r.lng },
+          nextRadius,
+          NOTIFY_BATCH_SIZE * 2,
+        );
+        const notified = await notifyCandidates(
+          ctx,
+          r._id,
+          r,
+          candidates,
+          r.notified ?? [],
+        );
+        await ctx.db.patch(r._id, { radiusKm: nextRadius });
+        expanded++;
+        notifiedTotal += notified;
+      }
+    }
+    return { expanded, notifiedTotal };
+  },
+});
+
+/** Cron: auto-activate submitted requests after the grace period. */
+export const autoVerifyPending = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const cutoff = Date.now() - AUTO_VERIFY_MINUTES * 60 * 1000;
+    const pending = await ctx.db
+      .query("emergencyRequests")
+      .withIndex("by_status", (q) => q.eq("status", "SUBMITTED"))
+      .collect();
+    let activated = 0;
+    for (const r of pending) {
+      if (r._creationTime < cutoff) {
+        assertTransition(r.status, "ACTIVE");
+        await ctx.db.patch(r._id, {
+          status: "ACTIVE",
+          verificationStatus: "verified",
+          verificationNote: "auto-verified after grace period",
+        });
+        const candidates = await findCandidates(
+          ctx,
+          { bloodGroup: r.bloodGroup, lat: r.lat, lng: r.lng },
+          SEARCH_RADII_KM[0],
+          NOTIFY_BATCH_SIZE,
+        );
+        await notifyCandidates(ctx, r._id, r, candidates, []);
+        if (candidates.length > 0) {
+          await ctx.db.patch(r._id, { status: "DONOR_CONTACTED" });
+        }
+        activated++;
+      }
+    }
+    return { activated };
   },
 });

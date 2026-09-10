@@ -30,8 +30,14 @@ export default function Admin() {
   const active = useQuery(api.admin.activeRequests);
   const stats = useQuery(api.admin.stats);
   const logs = useQuery(api.admin.auditTrail);
+  const verificationQueue = useQuery(api.admin.verificationQueue);
+  const openReports = useQuery(api.admin.openReports);
+  const users = useQuery(api.admin.users, {});
 
   const verifyOrg = useMutation(api.admin.verifyOrg);
+  const verifyRequest = useMutation(api.admin.verifyRequest);
+  const resolveReport = useMutation(api.admin.resolveReport);
+  const setSuspension = useMutation(api.admin.setUserSuspension);
 
   const decide = async (orgId: Id<"organizations">, approve: boolean) => {
     try {
@@ -71,19 +77,104 @@ export default function Admin() {
           ))}
         </div>
 
-        <Tabs defaultValue="orgs">
-          <TabsList>
-            <TabsTrigger value="orgs">
-              Organizations{" "}
-              {orgs && orgs.length > 0 && (
+        <Tabs defaultValue="verifications">
+          <TabsList className="flex-wrap">
+            <TabsTrigger value="verifications">
+              Request verification{" "}
+              {verificationQueue && verificationQueue.length > 0 && (
                 <Badge className="ml-1.5 px-1 py-0 text-[10px]">
-                  {orgs.length}
+                  {verificationQueue.length}
                 </Badge>
               )}
             </TabsTrigger>
+            <TabsTrigger value="orgs">
+              Organizations{" "}
+              {orgs && orgs.length > 0 && (
+                <Badge className="ml-1.5 px-1 py-0 text-[10px]">{orgs.length}</Badge>
+              )}
+            </TabsTrigger>
+            <TabsTrigger value="users">Users</TabsTrigger>
             <TabsTrigger value="emergencies">Emergencies</TabsTrigger>
+            <TabsTrigger value="reports">
+              Reports{" "}
+              {openReports && openReports.length > 0 && (
+                <Badge className="ml-1.5 px-1 py-0 text-[10px]">
+                  {openReports.length}
+                </Badge>
+              )}
+            </TabsTrigger>
             <TabsTrigger value="audit">Audit trail</TabsTrigger>
           </TabsList>
+
+          <TabsContent value="verifications" className="mt-4">
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="font-serif text-lg">
+                  Emergency verification queue
+                </CardTitle>
+                <CardDescription>
+                  Confirm details by phone or hospital record, then approve or
+                  reject. Unreviewed filings auto-activate after 30 minutes —
+                  verification must never block a genuine emergency.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                {!verificationQueue || verificationQueue.length === 0 ? (
+                  <p className="py-3 text-sm text-muted-foreground">
+                    Nothing awaiting verification.
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {verificationQueue.map((r) => (
+                      <div
+                        key={r._id}
+                        className="flex flex-wrap items-center justify-between gap-3 rounded-sm border border-border/70 px-3 py-2.5"
+                      >
+                        <div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <BloodGroupChip group={r.bloodGroup} />
+                            <span className="text-sm font-semibold">
+                              {r.hospitalName}
+                            </span>
+                            <StatusStamp value={r.urgency} />
+                          </div>
+                          <p className="mt-0.5 text-xs text-muted-foreground">
+                            {r.city} · {r.unitsRequired} units · filed{" "}
+                            {timeAgo(r._creationTime)}
+                          </p>
+                        </div>
+                        <div className="flex gap-2">
+                          <Button
+                            size="sm"
+                            className="gap-1"
+                            onClick={() =>
+                              verifyRequest({ requestId: r._id, approve: true })
+                                .then(() => toast.success("Approved & donors notified."))
+                                .catch((e) => toast.error(e instanceof Error ? e.message : "Failed."))
+                            }
+                          >
+                            <Check className="size-3.5" /> Approve
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="gap-1"
+                            onClick={() =>
+                              verifyRequest({ requestId: r._id, approve: false })
+                                .then(() => toast.success("Rejected."))
+                                .catch((e) => toast.error(e instanceof Error ? e.message : "Failed."))
+                            }
+                          >
+                            <X className="size-3.5" /> Reject
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
 
           <TabsContent value="orgs" className="mt-4">
             <Card>
@@ -240,6 +331,138 @@ export default function Admin() {
               </CardContent>
             </Card>
           </TabsContent>
+
+          <TabsContent value="users" className="mt-4">
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="font-serif text-lg">Users</CardTitle>
+                <CardDescription>
+                  Suspend abusive accounts; restore them when resolved.
+                  Suspended users cannot act anywhere in the system.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                {!users || users.length === 0 ? (
+                  <p className="py-3 text-sm text-muted-foreground">
+                    No users registered yet.
+                  </p>
+                ) : (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Name</TableHead>
+                        <TableHead>Role</TableHead>
+                        <TableHead>Status</TableHead>
+                        <TableHead className="text-right">Action</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {users.map((u) => (
+                        <TableRow key={u._id}>
+                          <TableCell className="text-sm">
+                            {u.name ?? "—"}
+                            <span className="block text-xs text-muted-foreground">
+                              {u.email ?? ""}
+                            </span>
+                          </TableCell>
+                          <TableCell>
+                            <StatusStamp value={u.role ?? "user"} />
+                          </TableCell>
+                          <TableCell>
+                            {u.suspended ? (
+                              <span className="stamp text-destructive">SUSPENDED</span>
+                            ) : (
+                              <span className="stamp text-chart-3">ACTIVE</span>
+                            )}
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <Button
+                              size="sm"
+                              variant={u.suspended ? "outline" : "destructive"}
+                              onClick={() =>
+                                setSuspension({ userId: u._id, suspended: !u.suspended })
+                                  .then(() =>
+                                    toast.success(
+                                      u.suspended ? "Account restored." : "Account suspended.",
+                                    ),
+                                  )
+                                  .catch((e) =>
+                                    toast.error(e instanceof Error ? e.message : "Failed."),
+                                  )
+                              }
+                            >
+                              {u.suspended ? "Restore" : "Suspend"}
+                            </Button>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="reports" className="mt-4">
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="font-serif text-lg">Abuse reports</CardTitle>
+              </CardHeader>
+              <CardContent>
+                {!openReports || openReports.length === 0 ? (
+                  <p className="py-3 text-sm text-muted-foreground">
+                    No open reports.
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {openReports.map((rep) => (
+                      <div
+                        key={rep._id}
+                        className="flex flex-wrap items-center justify-between gap-3 rounded-sm border border-border/70 px-3 py-2.5"
+                      >
+                        <div>
+                          <p className="stamp text-xs text-destructive">
+                            {rep.category}
+                          </p>
+                          <p className="mt-0.5 text-xs text-muted-foreground">
+                            {rep.requestId
+                              ? `emergency folio ${rep.requestId.slice(-6)}`
+                              : ""}{" "}
+                            · filed {timeAgo(rep.createdAt)}
+                            {rep.details ? ` · “${rep.details}”` : ""}
+                          </p>
+                        </div>
+                        <div className="flex gap-2">
+                          <Button
+                            size="sm"
+                            onClick={() =>
+                              resolveReport({ reportId: rep._id, outcome: "resolved" })
+                                .then(() => toast.success("Resolved."))
+                                .catch(() => toast.error("Failed."))
+                            }
+                          >
+                            Resolve
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() =>
+                              resolveReport({ reportId: rep._id, outcome: "dismissed" })
+                                .then(() => toast.success("Dismissed."))
+                                .catch(() => toast.error("Failed."))
+                            }
+                          >
+                            Dismiss
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
+
         </Tabs>
       </div>
     </AppShell>

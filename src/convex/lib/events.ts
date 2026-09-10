@@ -12,6 +12,23 @@ export async function notify(
     requestId?: Id<"emergencyRequests">;
   },
 ) {
+  // Deduplicate: skip if an identical unread notice was created moments ago
+  // (protects against cron-wave double notifications on retries).
+  const recent = await ctx.db
+    .query("notifications")
+    .withIndex("by_user_created", (q) => q.eq("userId", args.userId))
+    .order("desc")
+    .take(3);
+  if (
+    recent.some(
+      (n) =>
+        n.type === args.type &&
+        n.title === args.title &&
+        Date.now() - n.createdAt < 60_000,
+    )
+  ) {
+    return;
+  }
   await ctx.db.insert("notifications", {
     userId: args.userId,
     type: args.type,

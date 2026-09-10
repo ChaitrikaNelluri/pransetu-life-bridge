@@ -16,26 +16,28 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from "@/components/ui/dialog";
-import {
   AlertTriangle,
   Building2,
+  Check,
   Droplets,
+  Flag,
   HandHeart,
   MapPin,
+  ScrollText,
   UserRound,
+  X,
 } from "lucide-react";
 import { toast } from "sonner";
-import {
-  formatDateTime,
-  timeAgo,
-  hoursUntil,
-} from "@/lib/format";
+import { formatDateTime, timeAgo, hoursUntil } from "@/lib/format";
+
+const OPEN_STATUSES = [
+  "SUBMITTED",
+  "VERIFICATION_PENDING",
+  "ACTIVE",
+  "DONOR_CONTACTED",
+  "DONOR_ACCEPTED",
+  "PARTIALLY_FULFILLED",
+];
 
 export default function RequestDetail() {
   const { id } = useParams<{ id: string }>();
@@ -51,14 +53,22 @@ export default function RequestDetail() {
     api.requests.responses,
     id ? { requestId: id as never } : "skip",
   );
+  const matches = useQuery(
+    api.requests.matches,
+    id ? { requestId: id as never } : "skip",
+  );
   const donorProfile = useQuery(
     api.donors.myProfile,
     user?.role === "donor" ? {} : "skip",
   );
 
   const respond = useMutation(api.requests.respond);
+  const decline = useMutation(api.requests.decline);
   const cancel = useMutation(api.requests.cancel);
+  const close = useMutation(api.requests.close);
   const markFulfilled = useMutation(api.requests.markFulfilled);
+  const verify = useMutation(api.requests.verify);
+  const fileReport = useMutation(api.reports.file);
 
   if (request === undefined) {
     return (
@@ -86,14 +96,12 @@ export default function RequestDetail() {
 
   const isOwner = user?._id === request.requesterId;
   const isDonor = user?.role === "donor";
-  const canRespond =
-    isDonor &&
-    donorProfile &&
-    ["ACTIVE", "SUBMITTED"].includes(request.status) &&
-    !(responses ?? []).some(
-      (r) => r.responderId === user?._id && r.status !== "declined",
-    );
-
+  const isCoordinator = user?.role === "hospital" || user?.role === "admin";
+  const isOpen = OPEN_STATUSES.includes(request.status);
+  const myOffer = (responses ?? []).find(
+    (r) => r.responderId === user?._id && r.status !== "declined",
+  );
+  const canRespond = isDonor && donorProfile && isOpen && !myOffer;
   const activeResponses = (responses ?? []).filter(
     (r) => r.status !== "declined",
   );
@@ -121,9 +129,25 @@ export default function RequestDetail() {
     <AppShell>
       <div className="mx-auto max-w-3xl space-y-6">
         <div className="flex items-center gap-2">
-          <Link to="/requests" className="text-sm text-muted-foreground hover:text-foreground">
+          <Link
+            to="/requests"
+            className="text-sm text-muted-foreground hover:text-foreground"
+          >
             ← Emergencies
           </Link>
+          {isOpen && !isOwner && (
+            <button
+              type="button"
+              onClick={() =>
+                fileReport({ requestId: id as never, category: "FAKE_REQUEST" })
+                  .then(() => toast.success("Report filed for archivist review."))
+                  .catch(() => toast.error("Could not file report."))
+              }
+              className="ml-auto flex items-center gap-1 text-xs text-muted-foreground hover:text-destructive"
+            >
+              <Flag className="size-3" /> Report this folio
+            </button>
+          )}
         </div>
 
         {/* Header */}
@@ -136,6 +160,9 @@ export default function RequestDetail() {
             </h1>
             <StatusStamp value={request.status} />
             <StatusStamp value={request.urgency} />
+            {request.verificationStatus === "verified" && (
+              <span className="stamp text-chart-3">✓ verified</span>
+            )}
           </div>
           <p className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-muted-foreground">
             <span className="flex items-center gap-1">
@@ -149,9 +176,7 @@ export default function RequestDetail() {
                 ? `needed within ${hours}h`
                 : "past its required-by time"}
             </span>
-            {request.verificationStatus === "verified" && (
-              <span className="text-chart-3">✓ verified</span>
-            )}
+            {request.radiusKm && <span>search ring: {request.radiusKm} km</span>}
           </p>
         </div>
 
@@ -163,6 +188,52 @@ export default function RequestDetail() {
                 This request expired unfulfilled after 24 hours. File a fresh
                 request if the need remains.
               </p>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Verification panel for coordinators/admins */}
+        {request.status === "SUBMITTED" && isCoordinator && (
+          <Card className="plate border-chart-4/40">
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center gap-2 font-serif text-lg">
+                <ScrollText className="size-5 text-chart-4" /> Verification
+                review
+              </CardTitle>
+              <CardDescription>
+                Confirm by phone or hospital record, then approve or reject.
+                Unreviewed filings auto-activate after 30 minutes so genuine
+                emergencies are never blocked.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="flex gap-3">
+              <Button
+                className="gap-2"
+                onClick={() =>
+                  verify({ requestId: id as never, approve: true })
+                    .then(() =>
+                      toast.success("Request approved and donors notified."),
+                    )
+                    .catch((e) =>
+                      toast.error(e instanceof Error ? e.message : "Failed."),
+                    )
+                }
+              >
+                <Check className="size-4" /> Approve & notify donors
+              </Button>
+              <Button
+                variant="outline"
+                className="gap-2"
+                onClick={() =>
+                  verify({ requestId: id as never, approve: false })
+                    .then(() => toast.success("Request rejected."))
+                    .catch((e) =>
+                      toast.error(e instanceof Error ? e.message : "Failed."),
+                    )
+                }
+              >
+                <X className="size-4" /> Reject
+              </Button>
             </CardContent>
           </Card>
         )}
@@ -179,7 +250,11 @@ export default function RequestDetail() {
             </div>
             <div>
               <p className="smallcaps text-muted-foreground">Contact</p>
-              <p className="mt-0.5 font-mono">{request.contactPhone}</p>
+              <p className="mt-0.5 font-mono">
+                {isOwner || isCoordinator
+                  ? request.contactPhone
+                  : "••••• (shared when you respond)"}
+              </p>
             </div>
             <div>
               <p className="smallcaps text-muted-foreground">Needed by</p>
@@ -197,8 +272,9 @@ export default function RequestDetail() {
             )}
             <div className="sm:col-span-2 rounded-sm border border-border/60 bg-muted/50 p-3 text-xs text-muted-foreground">
               Potential donors are identified from profile information alone.
-              Final medical eligibility is always determined by the authorized
-              donation facility — not by PranSetu.
+              Final donation eligibility and blood compatibility must be
+              confirmed by the authorized blood-donation facility — not by
+              PranSetu.
             </div>
           </CardContent>
         </Card>
@@ -234,11 +310,24 @@ export default function RequestDetail() {
             </CardContent>
           </Card>
         )}
-        {isDonor && donorProfile && !canRespond && ["ACTIVE", "SUBMITTED"].includes(request.status) && (responses ?? []).some((r) => r.responderId === user?._id) && (
+        {isDonor && myOffer && isOpen && (
           <Card className="border-primary/30 bg-primary/5">
-            <CardContent className="pt-6 text-sm">
-              You have offered help on this folio. The requester will contact
-              you on the number on your profile.
+            <CardContent className="flex flex-wrap items-center justify-between gap-3 pt-6 text-sm">
+              <span>
+                You have offered help on this folio. The requester will contact
+                you on your profile number.
+              </span>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() =>
+                  decline({ requestId: id as never })
+                    .then(() => toast.success("Offer withdrawn."))
+                    .catch(() => toast.error("Failed."))
+                }
+              >
+                Withdraw offer
+              </Button>
             </CardContent>
           </Card>
         )}
@@ -304,57 +393,94 @@ export default function RequestDetail() {
           </CardContent>
         </Card>
 
+        {/* Explainable match sheet */}
+        {(matches ?? []).length > 0 && (
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="font-serif text-lg">
+                Ranked candidates (match sheet)
+              </CardTitle>
+              <CardDescription>
+                Deterministic, explainable ranking — compatibility, availability,
+                distance, reliability. Never a medical eligibility decision.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              {(matches ?? []).slice(0, 8).map((m, i) => (
+                <div
+                  key={m.userId}
+                  className="rounded-sm border border-border/70 px-3 py-2"
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-sm font-medium">
+                      #{i + 1} · {m.bloodGroup} donor ·{" "}
+                      {m.distanceKm.toFixed(1)} km
+                    </p>
+                    <span className="font-mono text-sm font-bold text-primary">
+                      {m.score}
+                    </span>
+                  </div>
+                  <ul className="mt-1 flex flex-wrap gap-1.5">
+                    {m.reasons.map((reason: string) => (
+                      <li
+                        key={reason}
+                        className="rounded-sm bg-secondary px-1.5 py-0.5 text-[11px] text-secondary-foreground"
+                      >
+                        {reason}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+        )}
+
         {/* Owner actions */}
-        {isOwner && ["SUBMITTED", "ACTIVE", "DONOR_ACCEPTED"].includes(request.status) && (
+        {isOwner && (isOpen || request.status === "FULFILLED") && (
           <Card>
             <CardContent className="flex flex-wrap gap-3 pt-6">
-              <Dialog>
-                <DialogTrigger asChild>
-                  <Button className="gap-2">
-                    <Droplets className="size-4" /> Mark units received
-                  </Button>
-                </DialogTrigger>
-                <DialogContent>
-                  <DialogHeader>
-                    <DialogTitle className="font-serif">
-                      Record units received
-                    </DialogTitle>
-                  </DialogHeader>
-                  <div className="space-y-3">
-                    {request.unitsFulfilled < request.unitsRequired ? (
-                      <Button
-                        className="w-full"
-                        onClick={async () => {
-                          try {
-                            await markFulfilled({ requestId: id as never });
-                            toast.success("Unit recorded against this folio.");
-                          } catch (err) {
-                            toast.error(
-                              err instanceof Error ? err.message : "Failed.",
-                            );
-                          }
-                        }}
-                      >
-                        Record 1 unit received
-                      </Button>
-                    ) : (
-                      <p className="text-sm text-muted-foreground">
-                        All units are already fulfilled.
-                      </p>
-                    )}
-                  </div>
-                </DialogContent>
-              </Dialog>
+              {request.unitsFulfilled < request.unitsRequired && (
+                <Button
+                  className="gap-2"
+                  onClick={() =>
+                    markFulfilled({ requestId: id as never })
+                      .then((res) =>
+                        toast.success(
+                          res.done ? "Request fully fulfilled!" : "Unit recorded.",
+                        ),
+                      )
+                      .catch((e) =>
+                        toast.error(e instanceof Error ? e.message : "Failed."),
+                      )
+                  }
+                >
+                  <Droplets className="size-4" /> Record a unit received
+                </Button>
+              )}
+              {request.status === "FULFILLED" && (
+                <Button
+                  className="gap-2"
+                  onClick={() =>
+                    close({ requestId: id as never })
+                      .then(() => toast.success("Folio closed."))
+                      .catch((e) =>
+                        toast.error(e instanceof Error ? e.message : "Failed."),
+                      )
+                  }
+                >
+                  <Check className="size-4" /> Close the folio
+                </Button>
+              )}
               <Button
                 variant="outline"
-                onClick={async () => {
-                  try {
-                    await cancel({ requestId: id as never });
-                    toast.success("Request cancelled.");
-                  } catch (err) {
-                    toast.error(err instanceof Error ? err.message : "Failed.");
-                  }
-                }}
+                onClick={() =>
+                  cancel({ requestId: id as never })
+                    .then(() => toast.success("Request cancelled."))
+                    .catch((e) =>
+                      toast.error(e instanceof Error ? e.message : "Failed."),
+                    )
+                }
               >
                 Cancel request
               </Button>

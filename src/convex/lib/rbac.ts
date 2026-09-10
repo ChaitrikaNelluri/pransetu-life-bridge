@@ -10,6 +10,9 @@ export async function requireUser(
   if (!userId) throw new Error("UNAUTHENTICATED");
   const user = await ctx.db.get(userId);
   if (!user) throw new Error("UNAUTHENTICATED");
+  if (user.suspended) {
+    throw new Error("ACCOUNT_SUSPENDED: contact an administrator");
+  }
   return user;
 }
 

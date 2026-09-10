@@ -37,9 +37,13 @@ export type BloodGroup = Infer<typeof bloodGroupValidator>;
 
 export const REQUEST_STATUSES = [
   "SUBMITTED",
+  "VERIFICATION_PENDING",
   "ACTIVE",
+  "DONOR_CONTACTED",
   "DONOR_ACCEPTED",
+  "PARTIALLY_FULFILLED",
   "FULFILLED",
+  "CLOSED",
   "CANCELLED",
   "EXPIRED",
   "REJECTED",
@@ -61,6 +65,8 @@ const schema = defineSchema(
       isAnonymous: v.optional(v.boolean()), // do not remove
       role: v.optional(roleValidator),
       onboarded: v.optional(v.boolean()),
+      // Abuse control: suspended users cannot act (see rbac.requireUser).
+      suspended: v.optional(v.boolean()),
       // Blood bank / hospital coordinators work under an organization
       orgId: v.optional(v.id("organizations")),
     })
@@ -136,9 +142,12 @@ const schema = defineSchema(
         v.literal("verified"),
         v.literal("rejected"),
       ),
+      verificationNote: v.optional(v.string()),
       verifiedBy: v.optional(v.id("users")),
       expiresAt: v.number(),
       radiusKm: v.optional(v.number()),
+      // Donor ids already notified about this request (batching/idempotency).
+      notified: v.optional(v.array(v.id("users"))),
     })
       .index("by_status", ["status"])
       .index("by_requester", ["requesterId", "status"]),
@@ -182,6 +191,39 @@ const schema = defineSchema(
       meta: v.optional(v.any()),
       createdAt: v.number(),
     }).index("by_created", ["createdAt"]),
+
+    // Member reports of suspicious requests or accounts.
+    reports: defineTable({
+      reporterId: v.id("users"),
+      requestId: v.optional(v.id("emergencyRequests")),
+      targetUserId: v.optional(v.id("users")),
+      category: v.union(
+        v.literal("FAKE_REQUEST"),
+        v.literal("SPAM"),
+        v.literal("ABUSE"),
+        v.literal("FALSE_INFORMATION"),
+        v.literal("SUSPICIOUS_ACCOUNT"),
+      ),
+      details: v.optional(v.string()),
+      status: v.union(v.literal("open"), v.literal("resolved"), v.literal("dismissed")),
+      resolvedBy: v.optional(v.id("users")),
+      createdAt: v.number(),
+    })
+      .index("by_status", ["status"])
+      .index("by_reporter", ["reporterId"]),
+
+    // Suspension flag for abuse control.
+    // (kept on users table as `suspended`)
+
+    // Google Maps geocode cache — cost control: never geocode the same
+    // query twice. Rows persist; misses fall back to the built-in gazetteer.
+    geocodeCache: defineTable({
+      queryKey: v.string(),
+      lat: v.number(),
+      lng: v.number(),
+      source: v.union(v.literal("google"), v.literal("gazetteer")),
+      createdAt: v.number(),
+    }).index("by_query", ["queryKey"]),
   },
   { schemaValidation: false },
 );

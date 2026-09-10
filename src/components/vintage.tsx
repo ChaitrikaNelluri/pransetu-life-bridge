@@ -22,10 +22,14 @@ export function BloodGroupChip({
 }
 
 const STAMP_STYLES: Record<string, string> = {
-  SUBMITTED: "text-muted-foreground border-muted-foreground/60",
+  SUBMITTED: "text-chart-4 border-chart-4/70 bg-chart-4/10",
+  VERIFICATION_PENDING: "text-chart-4 border-chart-4/70 bg-chart-4/10",
   ACTIVE: "text-chart-2 border-chart-2/70 bg-chart-2/10",
+  DONOR_CONTACTED: "text-primary border-primary/60 bg-primary/10",
   DONOR_ACCEPTED: "text-chart-3 border-chart-3/70 bg-chart-3/10",
+  PARTIALLY_FULFILLED: "text-chart-4 border-chart-4/70 bg-chart-4/10",
   FULFILLED: "text-chart-3 border-chart-3/70 bg-chart-3/10",
+  CLOSED: "text-muted-foreground border-muted-foreground/60",
   CANCELLED: "text-muted-foreground border-muted-foreground/60",
   EXPIRED: "text-destructive border-destructive/60 bg-destructive/5",
   REJECTED: "text-destructive border-destructive/60",

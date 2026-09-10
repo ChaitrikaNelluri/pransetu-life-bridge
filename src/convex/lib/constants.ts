@@ -43,3 +43,12 @@ export const REQUEST_TTL_HOURS = 24;
 export const SEARCH_RADII_KM = [5, 10, 25, 50] as const;
 export const MAX_DONOR_CANDIDATES = 30;
 
+/** Notification batching: donors notified per radius ring, per wave. */
+export const NOTIFY_BATCH_SIZE = 10;
+/** Minutes between progressive radius expansion waves (cron-driven). */
+export const NOTIFY_WAVE_MINUTES = 20;
+/** Duplicate-request window (minutes) for the same requester+group+hospital. */
+export const DUPLICATE_WINDOW_MINUTES = 30;
+/** Auto-verify after this many minutes without admin review (balance: never block a real emergency). */
+export const AUTO_VERIFY_MINUTES = 30;
+
