@@ -248,10 +248,17 @@ function donor(overrides: Partial<DonorCandidate> = {}): DonorCandidate {
 const hospital = { lat: 12.9716, lng: 77.5946 };
 
 describe("donor matching", () => {
-  it("scores a perfect candidate at the 100-point ceiling", () => {
+  it("scores a perfect no-history candidate at 90 points", () => {
     const result = scoreCandidate(donor(), "O+", hospital);
     expect(result).not.toBeNull();
-    expect(result!.score).toBe(100); // 40 exact + 20 available + 25 distance + 10 fresh + 5 interval
+    // 40 exact group + 20 available + 25 distance(0 km) + 0 reliability + 5 interval
+    expect(result!.score).toBe(90);
+  });
+
+  it("reaches the 100-point ceiling with a full reliability history", () => {
+    const result = scoreCandidate(donor({ acceptedCount: 10, responseCount: 10 }), "O+", hospital)!;
+    expect(result.score).toBe(100); // 90 + 10 (100% reliability)
+    expect(result.reasons).toContain("100% past response reliability");
   });
 
   it("scores a compatible (not exact) group lower", () => {
@@ -305,13 +312,14 @@ describe("donor matching", () => {
 
   it("scores unavailable donors lower but keeps them as candidates", () => {
     const unavailable = scoreCandidate(donor({ available: false }), "O+", hospital)!;
-    expect(unavailable.score).toBe(80);
+    expect(unavailable.score).toBe(70); // 90 − 20 availability points
     expect(unavailable.reasons).not.toContain("Marked available right now");
   });
 
   it("never exceeds 100 points", () => {
+    // O− donor for an O− patient: exact match + full reliability history.
     const result = scoreCandidate(
-      donor({ acceptedCount: 10, responseCount: 10 }),
+      donor({ bloodGroup: "O-", acceptedCount: 10, responseCount: 10 }),
       "O-",
       hospital,
     )!;

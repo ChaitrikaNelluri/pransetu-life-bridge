@@ -16,6 +16,7 @@ const BASE_NAV = [
   { to: "/dashboard", label: "Desk" },
   { to: "/requests", label: "Emergencies" },
   { to: "/blood-banks", label: "Blood Banks" },
+  { to: "/map", label: "Map" },
   { to: "/profile", label: "Profile" },
 ];
 

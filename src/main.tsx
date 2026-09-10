@@ -21,6 +21,7 @@ const BloodBanks = lazy(() => import("./pages/BloodBanks.tsx"));
 const OrgDashboard = lazy(() => import("./pages/OrgDashboard.tsx"));
 const Profile = lazy(() => import("./pages/Profile.tsx"));
 const Admin = lazy(() => import("./pages/Admin.tsx"));
+const MapView = lazy(() => import("./pages/MapView.tsx"));
 const NotFound = lazy(() => import("./pages/NotFound.tsx"));
 
 // Simple loading fallback for route transitions
@@ -182,6 +183,14 @@ createRoot(document.getElementById("root")!).render(
                 element={
                   <RequireAuth>
                     <OrgDashboard />
+                  </RequireAuth>
+                }
+              />
+              <Route
+                path="/map"
+                element={
+                  <RequireAuth>
+                    <MapView />
                   </RequireAuth>
                 }
               />
